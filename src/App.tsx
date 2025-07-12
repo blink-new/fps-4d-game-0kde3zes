@@ -3,6 +3,20 @@ import { Card } from './components/ui/card'
 import { Button } from './components/ui/button'
 import { Progress } from './components/ui/progress'
 
+interface EnemyProjectile {
+  id: string
+  x: number
+  y: number
+  z: number
+  w: number
+  vx: number
+  vy: number
+  damage: number
+  color: string
+  size: number
+  createdAt: number
+}
+
 interface Enemy {
   id: string
   x: number
@@ -15,6 +29,10 @@ interface Enemy {
   color: string
   size: number
   isActive: boolean
+  lastShot: number
+  shootCooldown: number
+  accuracy: number
+  detectionRange: number
 }
 
 interface Player {
@@ -28,6 +46,7 @@ interface Player {
   maxAmmo: number
   score: number
   level: number
+  lastDamaged: number
 }
 
 interface Crosshair {
@@ -48,15 +67,18 @@ const FPSGame: React.FC = () => {
     ammo: 30,
     maxAmmo: 30,
     score: 0,
-    level: 1
+    level: 1,
+    lastDamaged: 0
   })
   const [enemies, setEnemies] = useState<Enemy[]>([])
+  const [enemyProjectiles, setEnemyProjectiles] = useState<EnemyProjectile[]>([])
   const [crosshair, setCrosshair] = useState<Crosshair>({ x: 400, y: 300 })
   const [keys, setKeys] = useState<{ [key: string]: boolean }>({})
   const [dimensionShift, setDimensionShift] = useState(0)
   const [timeWarp, setTimeWarp] = useState(1)
   const [reloading, setReloading] = useState(false)
   const [muzzleFlash, setMuzzleFlash] = useState(false)
+  const [damageFlash, setDamageFlash] = useState(false)
 
   // Initialize game
   const initGame = useCallback(() => {
@@ -70,16 +92,18 @@ const FPSGame: React.FC = () => {
       ammo: 30,
       maxAmmo: 30,
       score: 0,
-      level: 1
+      level: 1,
+      lastDamaged: 0
     })
     setEnemies(generateEnemies(5))
+    setEnemyProjectiles([])
     setGameState('playing')
   }, [])
 
-  // Generate enemies with 4D positioning
+  // Generate enemies with 4D positioning and shooting capabilities
   const generateEnemies = (count: number): Enemy[] => {
     return Array.from({ length: count }, (_, i) => ({
-      id: `enemy-${i}`,
+      id: `enemy-${i}-${Date.now()}`,
       x: (Math.random() - 0.5) * 800,
       y: (Math.random() - 0.5) * 600,
       z: Math.random() * 200 - 100,
@@ -89,9 +113,112 @@ const FPSGame: React.FC = () => {
       type: Math.random() > 0.8 ? 'dimensional' : 'normal',
       color: Math.random() > 0.8 ? '#ff0066' : '#ff3300',
       size: 20 + Math.random() * 10,
-      isActive: true
+      isActive: true,
+      lastShot: 0,
+      shootCooldown: 1000 + Math.random() * 2000, // 1-3 seconds between shots
+      accuracy: 0.3 + Math.random() * 0.4, // 30-70% accuracy
+      detectionRange: 300 + Math.random() * 200 // 300-500 pixels detection range
     }))
   }
+
+  // Enemy AI shooting logic
+  const updateEnemyShooting = useCallback((currentTime: number) => {
+    const newProjectiles: EnemyProjectile[] = []
+    
+    setEnemies(prev => prev.map(enemy => {
+      if (!enemy.isActive) return enemy
+      
+      // Calculate distance to player (in screen coordinates)
+      const dx = (crosshair.x - 400) - enemy.x
+      const dy = (crosshair.y - 300) - enemy.y
+      const distance = Math.sqrt(dx * dx + dy * dy)
+      
+      // Check if enemy can shoot
+      if (distance <= enemy.detectionRange && 
+          currentTime - enemy.lastShot > enemy.shootCooldown) {
+        
+        // Calculate projectile trajectory with some inaccuracy
+        const angle = Math.atan2(dy, dx)
+        const inaccuracy = (Math.random() - 0.5) * (1 - enemy.accuracy) * Math.PI / 4
+        const finalAngle = angle + inaccuracy
+        
+        const speed = 3 + Math.random() * 2 // 3-5 pixels per frame
+        
+        newProjectiles.push({
+          id: `proj-${enemy.id}-${currentTime}`,
+          x: enemy.x + 400,
+          y: enemy.y + 300,
+          z: enemy.z,
+          w: enemy.w,
+          vx: Math.cos(finalAngle) * speed,
+          vy: Math.sin(finalAngle) * speed,
+          damage: 15 + Math.random() * 10, // 15-25 damage
+          color: enemy.type === 'dimensional' ? '#ff0066' : '#ff3300',
+          size: 3 + Math.random() * 2,
+          createdAt: currentTime
+        })
+        
+        return { ...enemy, lastShot: currentTime }
+      }
+      
+      return enemy
+    }))
+    
+    // Add new projectiles
+    if (newProjectiles.length > 0) {
+      setEnemyProjectiles(prev => [...prev, ...newProjectiles])
+    }
+  }, [crosshair])
+
+  // Update enemy projectiles and check for player hits
+  const updateProjectiles = useCallback(() => {
+    setEnemyProjectiles(prev => {
+      const updated = prev.map(proj => ({
+        ...proj,
+        x: proj.x + proj.vx * timeWarp,
+        y: proj.y + proj.vy * timeWarp
+      })).filter(proj => {
+        // Remove projectiles that are off-screen or too old
+        const isOnScreen = proj.x > -50 && proj.x < 850 && proj.y > -50 && proj.y < 650
+        const isNotTooOld = Date.now() - proj.createdAt < 5000 // 5 seconds max lifetime
+        return isOnScreen && isNotTooOld
+      })
+      
+      // Check for player hits
+      updated.forEach(proj => {
+        const playerScreenX = 400 + (player.x - proj.x + 400)
+        const playerScreenY = 300 + (player.y - proj.y + 300)
+        const distance = Math.sqrt(
+          Math.pow(proj.x - 400, 2) + Math.pow(proj.y - 300, 2)
+        )
+        
+        // Hit detection - if projectile is close to player center
+        if (distance < 25) { // Player hit radius
+          setPlayer(prevPlayer => {
+            const newHealth = Math.max(0, prevPlayer.health - proj.damage)
+            if (newHealth === 0) {
+              setGameState('gameOver')
+            }
+            return {
+              ...prevPlayer,
+              health: newHealth,
+              lastDamaged: Date.now()
+            }
+          })
+          
+          // Trigger damage flash
+          setDamageFlash(true)
+          setTimeout(() => setDamageFlash(false), 200)
+          
+          // Mark projectile for removal by setting x to invalid position
+          proj.x = -1000
+        }
+      })
+      
+      // Remove projectiles that hit the player
+      return updated.filter(proj => proj.x !== -1000)
+    })
+  }, [player.x, player.y, timeWarp])
 
   // Handle shooting
   const shoot = useCallback(() => {
@@ -220,27 +347,36 @@ const FPSGame: React.FC = () => {
     if (gameState !== 'playing') return
 
     const gameLoop = setInterval(() => {
+      const currentTime = Date.now()
+      
       // Update enemy positions
       setEnemies(prev => prev.map(enemy => {
         if (!enemy.isActive) return enemy
         
         return {
           ...enemy,
-          x: enemy.x + (Math.sin(Date.now() * 0.001 + enemy.id.length) * 2 * timeWarp),
-          y: enemy.y + (Math.cos(Date.now() * 0.001 + enemy.id.length) * 2 * timeWarp),
-          w: enemy.w + Math.sin(Date.now() * 0.002) * 0.5 * timeWarp
+          x: enemy.x + (Math.sin(currentTime * 0.001 + enemy.id.length) * 2 * timeWarp),
+          y: enemy.y + (Math.cos(currentTime * 0.001 + enemy.id.length) * 2 * timeWarp),
+          w: enemy.w + Math.sin(currentTime * 0.002) * 0.5 * timeWarp
         }
       }))
+
+      // Update enemy shooting
+      updateEnemyShooting(currentTime)
+      
+      // Update projectiles
+      updateProjectiles()
 
       // Check if level complete
       if (enemies.every(enemy => !enemy.isActive)) {
         setPlayer(prev => ({ ...prev, level: prev.level + 1 }))
         setEnemies(generateEnemies(5 + player.level))
+        setEnemyProjectiles([]) // Clear projectiles on new level
       }
     }, 16 / timeWarp)
 
     return () => clearInterval(gameLoop)
-  }, [gameState, enemies, timeWarp, player.level])
+  }, [gameState, enemies, timeWarp, player.level, updateEnemyShooting, updateProjectiles])
 
   // Render game
   useEffect(() => {
@@ -253,6 +389,12 @@ const FPSGame: React.FC = () => {
     // Clear canvas
     ctx.fillStyle = `linear-gradient(45deg, #000033 ${dimensionShift + 50}%, #001166 ${100 - dimensionShift}%)`
     ctx.fillRect(0, 0, canvas.width, canvas.height)
+
+    // Damage flash effect
+    if (damageFlash) {
+      ctx.fillStyle = 'rgba(255, 0, 0, 0.3)'
+      ctx.fillRect(0, 0, canvas.width, canvas.height)
+    }
 
     // Draw 4D grid effect
     ctx.strokeStyle = `rgba(0, 255, 255, ${0.2 + Math.abs(dimensionShift) * 0.01})`
@@ -269,6 +411,31 @@ const FPSGame: React.FC = () => {
       ctx.lineTo(canvas.width, i)
       ctx.stroke()
     }
+
+    // Draw enemy projectiles
+    enemyProjectiles.forEach(proj => {
+      const wOffset = (proj.w - player.w) * 2
+      const alpha = Math.max(0.1, 1 - Math.abs(wOffset) * 0.01)
+      
+      ctx.save()
+      ctx.globalAlpha = alpha
+      ctx.fillStyle = proj.color
+      ctx.shadowColor = proj.color
+      ctx.shadowBlur = 10
+      
+      // Draw projectile with trail effect
+      ctx.beginPath()
+      ctx.arc(proj.x, proj.y, proj.size, 0, 2 * Math.PI)
+      ctx.fill()
+      
+      // Trail effect
+      ctx.globalAlpha = alpha * 0.5
+      ctx.beginPath()
+      ctx.arc(proj.x - proj.vx * 2, proj.y - proj.vy * 2, proj.size * 0.7, 0, 2 * Math.PI)
+      ctx.fill()
+      
+      ctx.restore()
+    })
 
     // Draw enemies with 4D effects
     enemies.forEach(enemy => {
@@ -294,6 +461,23 @@ const FPSGame: React.FC = () => {
         2 * Math.PI
       )
       ctx.fill()
+
+      // Shooting indicator (glowing effect when about to shoot)
+      const timeSinceLastShot = Date.now() - enemy.lastShot
+      const timeUntilNextShot = enemy.shootCooldown - timeSinceLastShot
+      if (timeUntilNextShot < 500 && timeUntilNextShot > 0) {
+        ctx.strokeStyle = '#ffff00'
+        ctx.lineWidth = 2
+        ctx.beginPath()
+        ctx.arc(
+          enemy.x + 400 + wOffset,
+          enemy.y + 300 + wOffset,
+          Math.max(5, size) + 5,
+          0,
+          2 * Math.PI
+        )
+        ctx.stroke()
+      }
 
       // Health bar
       if (enemy.health < enemy.maxHealth) {
@@ -329,7 +513,7 @@ const FPSGame: React.FC = () => {
       ctx.fillStyle = 'rgba(0, 255, 255, 0.1)'
       ctx.fillRect(0, 0, canvas.width, canvas.height)
     }
-  }, [enemies, crosshair, dimensionShift, player.w, muzzleFlash, timeWarp])
+  }, [enemies, enemyProjectiles, crosshair, dimensionShift, player.w, muzzleFlash, timeWarp, damageFlash])
 
   if (gameState === 'menu') {
     return (
@@ -347,6 +531,7 @@ const FPSGame: React.FC = () => {
               <p>• R: Reload</p>
               <p>• Q/E: Shift 4D dimension</p>
               <p>• T: Toggle time warp</p>
+              <p className="text-red-400">• Enemies now shoot back!</p>
             </div>
             <Button onClick={initGame} className="px-8 py-4 text-lg bg-gradient-to-r from-purple-600 to-cyan-600 hover:from-purple-700 hover:to-cyan-700">
               Start Game
@@ -369,6 +554,30 @@ const FPSGame: React.FC = () => {
             <Button onClick={() => setGameState('menu')} variant="outline" className="ml-4 px-6 py-2">
               Main Menu
             </Button>
+          </div>
+        </Card>
+      </div>
+    )
+  }
+
+  if (gameState === 'gameOver') {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-red-900 via-black to-red-900 flex items-center justify-center">
+        <Card className="p-8 bg-black/70 border-red-500">
+          <div className="text-center space-y-6">
+            <h1 className="text-5xl font-bold text-red-400">GAME OVER</h1>
+            <div className="space-y-2">
+              <p className="text-xl text-white">Final Score: {player.score}</p>
+              <p className="text-lg text-gray-300">Level Reached: {player.level}</p>
+            </div>
+            <div className="space-x-4">
+              <Button onClick={initGame} className="px-6 py-2 bg-red-600 hover:bg-red-700">
+                Try Again
+              </Button>
+              <Button onClick={() => setGameState('menu')} variant="outline" className="px-6 py-2">
+                Main Menu
+              </Button>
+            </div>
           </div>
         </Card>
       </div>
@@ -426,14 +635,28 @@ const FPSGame: React.FC = () => {
         </Card>
       </div>
 
-      {/* Enemy Counter */}
+      {/* Enemy Counter and Projectile Alert */}
       <div className="absolute bottom-4 right-4">
         <Card className="p-3 bg-black/70 border-purple-500">
-          <div className="text-red-400 font-mono">
-            ENEMIES: {enemies.filter(e => e.isActive).length}
+          <div className="space-y-1">
+            <div className="text-red-400 font-mono">
+              ENEMIES: {enemies.filter(e => e.isActive).length}
+            </div>
+            <div className="text-orange-400 font-mono text-xs">
+              INCOMING: {enemyProjectiles.length}
+            </div>
           </div>
         </Card>
       </div>
+
+      {/* Low Health Warning */}
+      {player.health <= 25 && (
+        <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 text-center">
+          <div className="text-red-500 text-2xl font-bold animate-pulse">
+            LOW HEALTH!
+          </div>
+        </div>
+      )}
     </div>
   )
 }
